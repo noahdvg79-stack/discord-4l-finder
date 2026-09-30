@@ -1,163 +1,235 @@
-import asyncio
-import json
-import os
 import random
 import string
-from typing import Any
+import time
+import requests
 
-import aiohttp
+# =========================
+# CONFIG
+# =========================
 
-NAMECHECKLY_URL = "https://namecheckly.com/api/check"
+DISCORD_WEBHOOK = "PASTE_YOUR_DISCORD_WEBHOOK_HERE"
 
-# Discord username rules: lowercase a-z, 0-9, "_" and ".";
-# no consecutive periods. Discord says leading/trailing periods are allowed.
-CHARS = string.ascii_lowercase + string.digits + "_."
-LENGTH = 4
+# Namecheckly public API
+API_URL = "https://namecheckly.com/api/check"
 
-# Stay below Namecheckly's documented 100 requests/minute authenticated limit.
-# 90 checks/minute gives a little headroom.
-REQUESTS_PER_MINUTE = int(os.getenv("REQUESTS_PER_MINUTE", "90"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
-MAX_RUN_MINUTES = int(os.getenv("MAX_RUN_MINUTES", "5"))
+# Discord allows lowercase letters, numbers, "_" and "."
+CHARACTERS = string.ascii_lowercase + string.digits + "."
 
-API_KEY = os.environ["NAMECHECKLY_API_KEY"]
-WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
+# How many names to check each GitHub Actions run
+CHECKS_PER_RUN = 5
 
-
-def valid_username(name: str) -> bool:
-    return (
-        len(name) == LENGTH
-        and all(c in CHARS for c in name)
-        and ".." not in name
-    )
+# Public Namecheckly limit = 5 requests/minute.
+# 12 seconds between requests keeps us at <= 5/minute.
+DELAY = 12
 
 
-def random_candidate() -> str:
+# =========================
+# USERNAME GENERATOR
+# =========================
+
+def generate_username():
     while True:
-        candidate = "".join(random.choices(CHARS, k=LENGTH))
-        if valid_username(candidate):
-            return candidate
+        username = "".join(
+            random.choice(CHARACTERS)
+            for _ in range(4)
+        )
+
+        # Discord username rules
+        if len(username) != 4:
+            continue
+
+        # No consecutive periods
+        if ".." in username:
+            continue
+
+        return username
 
 
-def is_available(payload: Any) -> bool:
-    """Handle a few plausible API response shapes without assuming one exact schema."""
-    if not isinstance(payload, dict):
-        return False
+# =========================
+# NAMECHECKLY
+# =========================
 
-    # Expected documented shape is socials[].status / socials[].available.
-    socials = payload.get("socials")
-    if isinstance(socials, list):
-        for item in socials:
-            if not isinstance(item, dict):
-                continue
-            platform = str(item.get("platform", "")).lower()
-            if platform and platform != "discord":
-                continue
+def check_username(username):
 
-            if item.get("available") is True:
-                return True
-
-            status = str(item.get("status", "")).lower()
-            if status in {"available", "free"}:
-                return True
-
-            # Some APIs use boolean "taken".
-            if item.get("taken") is False:
-                return True
-
-    # Fallback shapes.
-    discord = payload.get("discord")
-    if isinstance(discord, dict):
-        if discord.get("available") is True:
-            return True
-        if str(discord.get("status", "")).lower() in {"available", "free"}:
-            return True
-        if discord.get("taken") is False:
-            return True
-
-    return False
-
-
-async def check(session: aiohttp.ClientSession, username: str) -> tuple[str, bool, str]:
     params = {
-        "name": username,
-        "platforms": "discord",
-    }
-    headers = {
-        "x-api-key": API_KEY,
-        "Accept": "application/json",
+        "name": username
     }
 
     try:
-        async with session.get(
-            NAMECHECKLY_URL,
+        response = requests.get(
+            API_URL,
             params=params,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as response:
-            body = await response.text()
+            timeout=20
+        )
 
-            if response.status != 200:
-                return username, False, f"HTTP {response.status}: {body[:200]}"
+        print(
+            f"Checking {username} | "
+            f"HTTP {response.status_code}"
+        )
 
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                return username, False, "Invalid JSON response"
+        if response.status_code != 200:
+            print(response.text[:500])
+            return False
 
-            return username, is_available(data), ""
-    except Exception as exc:
-        return username, False, repr(exc)
+        data = response.json()
+
+        print(data)
+
+        # Try to locate Discord information in the response.
+        #
+        # Namecheckly can return social-platform results in
+        # different structures, so we inspect the returned JSON.
+
+        if isinstance(data, dict):
+
+            # Common structure:
+            socials = data.get("socials")
+
+            if isinstance(socials, list):
+                for item in socials:
+
+                    if not isinstance(item, dict):
+                        continue
+
+                    platform = str(
+                        item.get("platform", "")
+                    ).lower()
+
+                    if platform == "discord":
+
+                        if item.get("available") is True:
+                            return True
+
+                        if str(
+                            item.get("status", "")
+                        ).lower() in {
+                            "available",
+                            "free"
+                        }:
+                            return True
+
+            # Alternative Discord structure
+            discord = data.get("discord")
+
+            if isinstance(discord, dict):
+
+                if discord.get("available") is True:
+                    return True
+
+                if str(
+                    discord.get("status", "")
+                ).lower() in {
+                    "available",
+                    "free"
+                }:
+                    return True
+
+        return False
+
+    except Exception as e:
+
+        print(
+            f"Error checking {username}: {e}"
+        )
+
+        return False
 
 
-async def send_webhook(session: aiohttp.ClientSession, username: str) -> None:
-    payload = {
-        "content": f"🎉 **4L Discord username found:** `{username}`",
-        "allowed_mentions": {"parse": []},
+# =========================
+# DISCORD WEBHOOK
+# =========================
+
+def send_to_discord(username):
+
+    message = {
+        "content":
+            f"🎉 **4L Discord username found!**\n"
+            f"`{username}`"
     }
 
-    async with session.post(
-        WEBHOOK_URL,
-        json=payload,
-        timeout=aiohttp.ClientTimeout(total=15),
-    ) as response:
-        if response.status >= 300:
-            body = await response.text()
-            raise RuntimeError(f"Discord webhook failed: HTTP {response.status}: {body[:300]}")
+    try:
 
+        response = requests.post(
+            DISCORD_WEBHOOK,
+            json=message,
+            timeout=20
+        )
 
-async def main() -> None:
-    # 90/minute by default. We run in batches so the runner doesn't hammer the API.
-    delay = 60.0 / max(1, REQUESTS_PER_MINUTE)
-    deadline = asyncio.get_running_loop().time() + (MAX_RUN_MINUTES * 60)
+        if response.status_code in (200, 204):
 
-    checked: set[str] = set()
-    connector = aiohttp.TCPConnector(limit=BATCH_SIZE)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        while asyncio.get_running_loop().time() < deadline:
-            candidates = []
-            while len(candidates) < BATCH_SIZE:
-                name = random_candidate()
-                if name not in checked:
-                    checked.add(name)
-                    candidates.append(name)
-
-            results = await asyncio.gather(
-                *(check(session, name) for name in candidates)
+            print(
+                f"✅ Sent {username} to Discord"
             )
 
-            for username, available, error in results:
-                if error:
-                    print(f"[WARN] {username}: {error}")
-                elif available:
-                    print(f"[FOUND] {username}")
-                    await send_webhook(session, username)
+        else:
 
-            # Keep average request rate below the configured ceiling.
-            await asyncio.sleep(delay * len(candidates))
+            print(
+                f"❌ Discord webhook error: "
+                f"{response.status_code}"
+            )
 
-    print(f"Checked {len(checked)} unique 4-character candidates this run.")
+    except Exception as e:
+
+        print(
+            f"Webhook error: {e}"
+        )
+
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+
+    print(
+        "Starting Discord 4L username scanner..."
+    )
+
+    checked = set()
+
+    for i in range(CHECKS_PER_RUN):
+
+        username = generate_username()
+
+        while username in checked:
+            username = generate_username()
+
+        checked.add(username)
+
+        print(
+            f"\n[{i + 1}/{CHECKS_PER_RUN}] "
+            f"Testing {username}"
+        )
+
+        available = check_username(
+            username
+        )
+
+        if available:
+
+            print(
+                f"🎉 AVAILABLE: {username}"
+            )
+
+            send_to_discord(
+                username
+            )
+
+        else:
+
+            print(
+                f"❌ Taken: {username}"
+            )
+
+        # Don't wait after the final request
+        if i < CHECKS_PER_RUN - 1:
+
+            print(
+                f"Waiting {DELAY} seconds..."
+            )
+
+            time.sleep(DELAY)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
