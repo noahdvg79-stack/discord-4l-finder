@@ -1,25 +1,11 @@
-name: Discord 4L Username Finder
+name: Discord 4L Finder - Apify
 
 on:
 
-  # Allows you to manually start it.
   workflow_dispatch:
-
-  # Automatically starts another run periodically.
-  schedule:
-    - cron: "0 */6 * * *"
 
 permissions:
   contents: read
-
-concurrency:
-
-  # Prevent multiple scanners accidentally
-  # running at the same time.
-  group: discord-4l-scanner
-
-  # Never start another copy while one is running.
-  cancel-in-progress: false
 
 jobs:
 
@@ -27,58 +13,49 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # GitHub-hosted runners have execution limits.
-    # This keeps each scanner session below
-    # the normal GitHub-hosted job limit.
+    # Maximum practical GitHub-hosted run.
     timeout-minutes: 350
 
     steps:
 
-      # -----------------------------------------
-      # Download your repository
-      # -----------------------------------------
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -----------------------------------------
-      # Install Python
-      # -----------------------------------------
+      # ==========================================
+      # PYTHON
+      # ==========================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # -----------------------------------------
-      # Install aiohttp
-      # -----------------------------------------
+      # ==========================================
+      # DEPENDENCIES
+      # ==========================================
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # -----------------------------------------
-      # Start scanner
-      # -----------------------------------------
+      # ==========================================
+      # SCANNER
+      # ==========================================
 
       - name: Run scanner
         env:
 
-          # GitHub Secret:
-          # Settings
-          # -> Secrets and variables
-          # -> Actions
-          # -> New repository secret
-          #
-          # Name:
-          # DISCORD_WEBHOOK
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
 
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
-          # Force Python to print immediately.
           PYTHONUNBUFFERED: "1"
 
         run: |
+
           python -u scanner.py
