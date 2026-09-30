@@ -1,0 +1,36 @@
+name: Find 4L Discord Usernames
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub's shortest scheduled interval is 5 minutes.
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Scan for available 4L names
+        env:
+          NAMECHECKLY_API_KEY: ${{ secrets.NAMECHECKLY_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REQUESTS_PER_MINUTE: "90"
+          BATCH_SIZE: "15"
+          MAX_RUN_MINUTES: "5"
+        run: python scanner.py
