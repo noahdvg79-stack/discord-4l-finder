@@ -7,7 +7,7 @@ import requests
 # CONFIG
 # =========================
 
-DISCORD_WEBHOOK = "PASTE_YOUR_DISCORD_WEBHOOK_HERE"
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1554879248651518053/ob6LqXxWjZuC9S884yUvWwWf5VyqT-5TZNZBYs8qKPC_i-TY1YqInBrbhLnK0aJf4gGO"
 
 # Namecheckly public API
 API_URL = "https://namecheckly.com/api/check"
