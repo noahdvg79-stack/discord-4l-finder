@@ -5,48 +5,80 @@ import string
 import aiohttp
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK"]
 
-# Number of simultaneous requests.
-# Start with 5. The program automatically backs off on 429s.
+# Number of simultaneous checks.
+#
+# Start at 5. If Discord returns 429 rate limits, the program
+# automatically waits for the requested amount of time.
 CONCURRENCY = 5
 
-# 4-character usernames
-LENGTH = 4
+# We only want 4-character usernames.
+USERNAME_LENGTH = 4
 
-# Discord username characters
-CHARACTERS = string.ascii_lowercase + string.digits + "_."
+# Discord username characters.
+CHARACTERS = (
+    string.ascii_lowercase
+    + string.digits
+    + "_."
+)
+
+# Discord's username availability endpoint.
+DISCORD_URL = (
+    "https://discord.com/api/v9/"
+    "unique-username/username-attempt-unauthed"
+)
+
 
 # ============================================================
-# USERNAME GENERATOR
+# USERNAME VALIDATION
 # ============================================================
 
-def valid_username(username):
-    if len(username) != 4:
+def valid_username(username: str) -> bool:
+    """
+    Check whether a generated username follows the basic
+    Discord username character rules.
+    """
+
+    # Exactly 4 characters.
+    if len(username) != USERNAME_LENGTH:
         return False
 
-    if any(c not in CHARACTERS for c in username):
+    # Only allowed characters.
+    if any(
+        character not in CHARACTERS
+        for character in username
+    ):
         return False
 
-    # Don't allow consecutive periods
+    # Discord doesn't allow consecutive periods.
     if ".." in username:
         return False
 
-    # Don't allow periods at either end
-    if username.startswith(".") or username.endswith("."):
+    # Don't generate leading/trailing periods.
+    # This keeps the generated pool conservative.
+    if username.startswith("."):
+        return False
+
+    if username.endswith("."):
         return False
 
     return True
 
 
-def generate_username():
+def generate_username() -> str:
+    """
+    Generate a random valid 4-character username.
+    """
+
     while True:
+
         username = "".join(
             random.choice(CHARACTERS)
-            for _ in range(LENGTH)
+            for _ in range(USERNAME_LENGTH)
         )
 
         if valid_username(username):
@@ -54,16 +86,23 @@ def generate_username():
 
 
 # ============================================================
-# DISCORD AVAILABILITY CHECK
+# DISCORD CHECK
 # ============================================================
 
-URL = (
-    "https://discord.com/api/v9/"
-    "unique-username/username-attempt-unauthed"
-)
+async def check_username(
+    session: aiohttp.ClientSession,
+    username: str
+):
+    """
+    Ask Discord whether a username is taken.
 
+    Returns:
 
-async def check_username(session, username):
+        ("available", retry_after)
+        ("taken", 0)
+        ("rate_limit", retry_after)
+        ("error", retry_after)
+    """
 
     payload = {
         "username": username
@@ -72,96 +111,201 @@ async def check_username(session, username):
     try:
 
         async with session.post(
-            URL,
+            DISCORD_URL,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=15)
+            headers={
+                "Content-Type": "application/json"
+            },
+            timeout=aiohttp.ClientTimeout(
+                total=10,
+                connect=5
+            )
         ) as response:
 
-            # Rate limited
+            # ------------------------------------------------
+            # RATE LIMIT
+            # ------------------------------------------------
+
             if response.status == 429:
 
                 try:
                     data = await response.json()
 
                     retry_after = float(
-                        data.get("retry_after", 5)
+                        data.get(
+                            "retry_after",
+                            5
+                        )
                     )
 
                 except Exception:
+
                     retry_after = 5
 
                 print(
-                    f"[RATE LIMIT] Waiting "
-                    f"{retry_after:.1f}s"
+                    f"[429] Discord rate limit "
+                    f"for {username}; "
+                    f"waiting {retry_after:.2f}s",
+                    flush=True
                 )
 
-                return username, "rate_limit", retry_after
+                return (
+                    "rate_limit",
+                    retry_after
+                )
 
-            # Successful request
+            # ------------------------------------------------
+            # SUCCESS
+            # ------------------------------------------------
+
             if response.status == 200:
 
                 try:
+
                     data = await response.json()
+
                 except Exception:
-                    return username, "unknown", 0
+
+                    print(
+                        f"[ERROR] Invalid JSON "
+                        f"for {username}",
+                        flush=True
+                    )
+
+                    return (
+                        "error",
+                        0
+                    )
 
                 print(
-                    f"[CHECK] {username} -> {data}"
+                    f"[CHECK] {username} -> {data}",
+                    flush=True
                 )
 
-                # Discord's response normally contains
-                # a boolean indicating whether the username
-                # can be used.
+                # Discord endpoint returns:
+                #
+                # {"taken": true}
+                #
+                # or
+                #
+                # {"taken": false}
+
                 if data.get("taken") is False:
-                    return username, "available", 0
+
+                    return (
+                        "available",
+                        0
+                    )
 
                 if data.get("taken") is True:
-                    return username, "taken", 0
 
-                # Some responses use username_exists
-                if data.get("username_exists") is False:
-                    return username, "available", 0
+                    return (
+                        "taken",
+                        0
+                    )
 
-                if data.get("username_exists") is True:
-                    return username, "taken", 0
+                # Some implementations/API versions can return
+                # an alternative field.
+                if data.get(
+                    "username_exists"
+                ) is False:
 
-                return username, "unknown", 0
+                    return (
+                        "available",
+                        0
+                    )
+
+                if data.get(
+                    "username_exists"
+                ) is True:
+
+                    return (
+                        "taken",
+                        0
+                    )
+
+                print(
+                    f"[UNKNOWN] Unexpected response "
+                    f"for {username}: {data}",
+                    flush=True
+                )
+
+                return (
+                    "error",
+                    0
+                )
+
+            # ------------------------------------------------
+            # OTHER HTTP STATUS
+            # ------------------------------------------------
+
+            body = await response.text()
 
             print(
                 f"[HTTP {response.status}] "
-                f"{username}"
+                f"{username}: "
+                f"{body[:300]}",
+                flush=True
             )
 
-            return username, "unknown", 0
+            return (
+                "error",
+                0
+            )
 
     except asyncio.TimeoutError:
 
         print(
-            f"[TIMEOUT] {username}"
+            f"[TIMEOUT] {username}",
+            flush=True
         )
 
-        return username, "unknown", 0
+        return (
+            "error",
+            0
+        )
 
-    except Exception as e:
+    except aiohttp.ClientError as error:
 
         print(
-            f"[ERROR] {username}: {e}"
+            f"[NETWORK ERROR] "
+            f"{username}: {error}",
+            flush=True
         )
 
-        return username, "unknown", 0
+        return (
+            "error",
+            0
+        )
+
+    except Exception as error:
+
+        print(
+            f"[ERROR] "
+            f"{username}: {error}",
+            flush=True
+        )
+
+        return (
+            "error",
+            0
+        )
 
 
 # ============================================================
 # DISCORD WEBHOOK
 # ============================================================
 
-async def send_webhook(session, username):
+async def send_webhook(
+    session: aiohttp.ClientSession,
+    username: str
+):
 
     payload = {
-        "content":
-            f"🎉 **4L AVAILABLE**\n"
-            f"```{username}```\n"
-            f"Grab it immediately!"
+        "content": (
+            "🎉 **4L DISCORD USERNAME FOUND**\n"
+            f"```{username}```"
+        )
     }
 
     try:
@@ -169,65 +313,117 @@ async def send_webhook(session, username):
         async with session.post(
             WEBHOOK_URL,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=15)
+            timeout=aiohttp.ClientTimeout(
+                total=10
+            )
         ) as response:
 
-            if response.status in (200, 204):
+            if response.status in (
+                200,
+                204
+            ):
 
                 print(
-                    f"[FOUND] {username} "
-                    f"-> sent to Discord"
+                    f"[WEBHOOK] Sent {username}",
+                    flush=True
                 )
 
             else:
 
+                body = await response.text()
+
                 print(
                     f"[WEBHOOK ERROR] "
-                    f"HTTP {response.status}"
+                    f"HTTP {response.status}: "
+                    f"{body[:300]}",
+                    flush=True
                 )
 
-    except Exception as e:
+    except Exception as error:
 
         print(
-            f"[WEBHOOK ERROR] {e}"
+            f"[WEBHOOK ERROR] "
+            f"{error}",
+            flush=True
         )
 
 
 # ============================================================
-# CONTINUOUS SCANNER
+# WORKER
 # ============================================================
 
 async def worker(
-    session,
-    semaphore,
-    checked
+    session: aiohttp.ClientSession,
+    worker_id: int,
+    checked: set,
+    checked_lock: asyncio.Lock
 ):
 
     while True:
 
-        username = generate_username()
+        # ---------------------------------------------
+        # Generate a username that hasn't been checked
+        # by another worker.
+        # ---------------------------------------------
 
-        # Avoid checking the same name repeatedly
-        # during this runner session.
-        if username in checked:
-            continue
+        while True:
 
-        checked.add(username)
+            username = generate_username()
 
-        async with semaphore:
+            async with checked_lock:
 
-            result = await check_username(
+                if username not in checked:
+
+                    checked.add(username)
+
+                    break
+
+        print(
+            f"[WORKER {worker_id}] "
+            f"Testing {username}",
+            flush=True
+        )
+
+        # ---------------------------------------------
+        # Check Discord
+        # ---------------------------------------------
+
+        status, retry_after = (
+            await check_username(
                 session,
                 username
             )
+        )
 
-        username, status, retry_after = result
+        # ---------------------------------------------
+        # AVAILABLE
+        # ---------------------------------------------
 
         if status == "available":
 
             print(
-                f"\n🎉🎉🎉 AVAILABLE: "
-                f"{username}\n"
+                "",
+                flush=True
+            )
+
+            print(
+                "🎉🎉🎉🎉🎉🎉🎉🎉",
+                flush=True
+            )
+
+            print(
+                f"AVAILABLE: {username}",
+                flush=True
+            )
+
+            print(
+                "🎉🎉🎉🎉🎉🎉🎉🎉",
+                flush=True
+            )
+
+            print(
+                "",
+                flush=True
             )
 
             await send_webhook(
@@ -235,25 +431,40 @@ async def worker(
                 username
             )
 
+        # ---------------------------------------------
+        # TAKEN
+        # ---------------------------------------------
+
         elif status == "taken":
 
             print(
-                f"[TAKEN] {username}"
+                f"[TAKEN] {username}",
+                flush=True
             )
+
+        # ---------------------------------------------
+        # RATE LIMITED
+        # ---------------------------------------------
 
         elif status == "rate_limit":
 
-            # Everyone waits when Discord tells us
-            # to slow down.
+            # Discord has told us how long to wait.
             await asyncio.sleep(
-                max(retry_after, 1)
+                max(
+                    retry_after,
+                    1
+                )
             )
+
+        # ---------------------------------------------
+        # ERROR
+        # ---------------------------------------------
 
         else:
 
-            print(
-                f"[UNKNOWN] {username}"
-            )
+            # Small pause so a temporary network error
+            # doesn't create a tight loop.
+            await asyncio.sleep(1)
 
 
 # ============================================================
@@ -262,57 +473,104 @@ async def worker(
 
 async def main():
 
-    print("=" * 60)
-    print("DISCORD 4L USERNAME FINDER")
-    print("Continuous mode")
-    print("=" * 60)
-
     print(
-        f"Concurrency: {CONCURRENCY}"
+        "=" * 60,
+        flush=True
     )
 
     print(
-        "Press Cancel workflow in GitHub "
-        "to stop it."
+        "DISCORD 4L USERNAME FINDER",
+        flush=True
     )
 
-    connector = aiohttp.TCPConnector(
-        limit=CONCURRENCY
+    print(
+        "CONTINUOUS MODE",
+        flush=True
     )
 
-    semaphore = asyncio.Semaphore(
-        CONCURRENCY
+    print(
+        "=" * 60,
+        flush=True
+    )
+
+    print(
+        f"Workers: {CONCURRENCY}",
+        flush=True
+    )
+
+    print(
+        "Checking Discord directly.",
+        flush=True
+    )
+
+    print(
+        "The scanner will continue until "
+        "the GitHub job is stopped.",
+        flush=True
+    )
+
+    print(
+        "=" * 60,
+        flush=True
     )
 
     checked = set()
+
+    checked_lock = asyncio.Lock()
+
+    connector = aiohttp.TCPConnector(
+        limit=CONCURRENCY,
+        limit_per_host=CONCURRENCY,
+        ttl_dns_cache=300
+    )
 
     async with aiohttp.ClientSession(
         connector=connector
     ) as session:
 
-        workers = [
-            asyncio.create_task(
+        workers = []
+
+        for worker_id in range(
+            1,
+            CONCURRENCY + 1
+        ):
+
+            task = asyncio.create_task(
                 worker(
                     session,
-                    semaphore,
-                    checked
+                    worker_id,
+                    checked,
+                    checked_lock
                 )
             )
-            for _ in range(CONCURRENCY)
-        ]
+
+            workers.append(task)
 
         await asyncio.gather(
             *workers
         )
 
 
+# ============================================================
+# START
+# ============================================================
+
 if __name__ == "__main__":
 
     try:
-        asyncio.run(main())
+
+        asyncio.run(
+            main()
+        )
 
     except KeyboardInterrupt:
 
         print(
-            "\nScanner stopped."
+            "",
+            flush=True
+        )
+
+        print(
+            "Scanner stopped.",
+            flush=True
         )
