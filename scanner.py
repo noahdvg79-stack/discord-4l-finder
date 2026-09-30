@@ -8,7 +8,7 @@ import aiohttp
 # CONFIG
 # ============================================================
 
-WEBHOOK_URL = os.environ["https://discord.com/api/webhooks/1554879248651518053/ob6LqXxWjZuC9S884yUvWwWf5VyqT-5TZNZBYs8qKPC_i-TY1YqInBrbhLnK0aJf4gGO"]
+WEBHOOK_URL = os.environ["DISCORD_WEBHOOK"]
 
 # Number of simultaneous requests.
 # Start with 5. The program automatically backs off on 429s.
